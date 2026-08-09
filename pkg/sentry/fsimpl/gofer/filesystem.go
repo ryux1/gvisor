@@ -1080,6 +1080,9 @@ afterTrailingSymlink:
 // Used to log a rejected fifo open, once.
 var logRejectedFifoOpenOnce sync.Once
 
+// Used to log an open of an unimplemented character device, once.
+var logUnimplementedCharDevOpenOnce sync.Once
+
 // Preconditions: The caller must hold no locks (since opening pipes may block
 // indefinitely).
 func (d *dentry) open(ctx context.Context, rp *vfs.ResolvingPath, opts *vfs.OpenOptions) (*vfs.FileDescription, error) {
@@ -1172,6 +1175,20 @@ func (d *dentry) open(ctx context.Context, rp *vfs.ResolvingPath, opts *vfs.Open
 				log.Warningf("Rejecting attempt to open fifo/pipe from host filesystem: %q. If you want to allow this, set flag --host-fifo=open", d.name)
 			})
 			return nil, linuxerr.EPERM
+		}
+	case linux.S_IFCHR:
+		switch d.inode.fs.opts.charDevicePolicy {
+		case charDevEmulatedOnly:
+			if !rp.VirtualFilesystem().IsDeviceRegistered(vfs.CharDevice, d.inode.rdevMajor, d.inode.rdevMinor) {
+				logUnimplementedCharDevOpenOnce.Do(func() {
+					log.Warningf("Opening character device %d:%d (%q), which the sentry does not implement; the open will fail with ENXIO. If you want to allow this device to be opened on the host instead, set flag --character-device-policy=prefer-emulated", d.inode.rdevMajor, d.inode.rdevMinor, d.name)
+				})
+			}
+			return rp.VirtualFilesystem().OpenDeviceSpecialFile(ctx, mnt, &d.vfsd, vfs.CharDevice, d.inode.rdevMajor, d.inode.rdevMinor, opts)
+		case charDevPreferEmulated:
+			if rp.VirtualFilesystem().IsDeviceRegistered(vfs.CharDevice, d.inode.rdevMajor, d.inode.rdevMinor) {
+				return rp.VirtualFilesystem().OpenDeviceSpecialFile(ctx, mnt, &d.vfsd, vfs.CharDevice, d.inode.rdevMajor, d.inode.rdevMinor, opts)
+			}
 		}
 	}
 
